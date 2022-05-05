@@ -33,6 +33,7 @@
 
 */
 #include <SoftwareSerial.h>
+#include <Button2.h>
 #include <Arduino.h>
 #include <U8g2lib.h>
 
@@ -230,9 +231,16 @@ U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, /* clock=*/ 15, /* data=*/ 4, 
 #define PIN_O2_TX 39
 #define PIN_CO2_RX 14
 #define PIN_CO2_TX 27
+#define PIN_BUTTON_CAL 0
+
+#define UPDATE_PERIOD_MS 1000
+#define INTERFACE_CYCLE_MS 50
+#define CAL_TIMEOUT_S 10
 
 SoftwareSerial o2serial;
 SoftwareSerial co2serial;
+
+Button2 button_cal;
 
 bool toggle;
 float percentO2;
@@ -240,21 +248,35 @@ int mbarPres;
 char buf_o [5];
 char buf_pres [5];
 char buf_c [5];
+char buf_cal [22];
 int dummy;
 int ppmCO2;
+int state = 0;
+int prevTime = 0;
+int nowTime = 0;
+int cal_countdown = 0;
 
 byte co2_cmd_read[] = {0xFF, 0x01, 0x86, 0x00, 0x00, 0x00, 0x00, 0x00, 0x79};
 byte co2_cmd_disable_abc[] = {0xFF, 0x01, 0x79, 0x00, 0x00, 0x00, 0x00, 0x00, 0x86};
 byte co2_cmd_cal_baseline[] =  {0xFF, 0x01, 0x87, 0x00, 0x00, 0x00, 0x00, 0x00, 0x78};
 
 void setup(void) {
+
+  prevTime = millis();
+  
   u8g2.begin();
+
+  Serial.begin(115200);
+
+  button_cal.begin(PIN_BUTTON_CAL);
+  
   o2serial.begin(9600, SWSERIAL_8N1, PIN_O2_RX, PIN_O2_TX, false);
   co2serial.begin(9600, SWSERIAL_8N1, PIN_CO2_RX, PIN_CO2_TX, false);
   delay(100);
-  o2serial.write("M 1\r\n");
+  
+  o2serial.write("M 1\r\n");  //place oxygen sensor into polling mode
 
-  co2serial.write(co2_cmd_disable_abc, sizeof(co2_cmd_disable_abc));
+  co2serial.write(co2_cmd_disable_abc, sizeof(co2_cmd_disable_abc));  //disable auto baseline calibration
   delay(100);
   while(co2serial.available()){
     co2serial.read();
@@ -262,100 +284,185 @@ void setup(void) {
 }
 
 void loop(void) {
+  
+  button_cal.loop();
+  delay(INTERFACE_CYCLE_MS);  //to reduce processing cycles
+  
+  switch(state) {
+    
+    case 0: //read sensors and update the display
+      if (button_cal.wasPressed()) {
+        button_cal.read();
+        state = 1;
+      }
+      nowTime = millis();
+      Serial.println(nowTime-prevTime);
+      if (nowTime - prevTime > UPDATE_PERIOD_MS || nowTime - prevTime < 0) {
+      
+        //toggle for the heartbeat telltale
+        if (toggle==true){
+          toggle=false;
+        }
+        else {
+          toggle=true;
+        }
+      
+        //get reading from O2 sensor
+        o2serial.print("A\r\n");
+        o2serial.flush();
+        delay(100);
+      
+        if(o2serial.find("P")) {
+          mbarPres = o2serial.parseInt();
+        }
+        
+        if(o2serial.find("%")) {
+          percentO2 = o2serial.parseFloat(); //round
+        }
+        
+        o2serial.find("\n"); //read the rest of the line
+      
+        //get reading from CO2 sensor
+        byte response[9];
+        int i = 0;
+        co2serial.write(co2_cmd_read, sizeof(co2_cmd_read));
+        while(co2serial.available() < 8) {  //wait for the bits to come in
+          delay(10);
+        }
+        while(co2serial.available()) {
+          if (i < 9) {
+            response[i] = co2serial.read();
+            i++;
+          } else {
+            co2serial.read();
+          }
+        }
+        delay(100);
+        while(co2serial.available()){
+          co2serial.read();
+        }
+        
+        ppmCO2 = 256*int(response[2]) + int(response[3]);
+    
+        //format reading from O2 sensor
+        sprintf(buf_pres,"%4d",mbarPres);
+        sprintf(buf_o,"%2.1f",percentO2);
+        
+        //format reading from CO2 sensor
+        sprintf(buf_c, "%4u" ,ppmCO2); 
+        
+        //update display
+        u8g2.clearBuffer();					// clear the internal memory
+        
+        u8g2.setFont(u8g2_font_ncenB10_tf);
+        u8g2.drawStr(0,21,"O"); // write something to the internal memory
+        u8g2.setFont(u8g2_font_ncenB08_tf);
+        u8g2.drawStr(9,24,"2");
+        if (toggle==true){
+          u8g2.setFont(u8g2_font_logisoso22_tf);
+          u8g2.drawStr(15,24,":");
+        }
+        
+        u8g2.setFont(u8g2_font_logisoso26_tf);
+        u8g2.drawStr(23,29,buf_o);
+        u8g2.setFont(u8g2_font_logisoso20_tf);
+        u8g2.drawStr(84,26,"%");
+        
+        u8g2.setFont(u8g2_font_ncenB08_tf);
+        u8g2.drawStr(100,7,"pres");
+        if (toggle==true){
+          u8g2.setFont(u8g2_font_ncenB08_tf);
+          u8g2.drawStr(125,7,":");
+        }
+        u8g2.setFont(u8g2_font_ncenB08_tf);
+        u8g2.drawStr(100,20,buf_pres);  
+        u8g2.setFont(u8g2_font_ncenB08_tf);
+        u8g2.drawStr(100,32,"mbar");  	
+      
+        u8g2.setFont(u8g2_font_ncenB10_tf);
+        u8g2.drawStr(0,53,"CO"); // write something to the internal memory
+        u8g2.setFont(u8g2_font_ncenB08_tf);
+        u8g2.drawStr(18,56,"2");
+        if (toggle==true){
+          u8g2.setFont(u8g2_font_logisoso22_tf);
+          u8g2.drawStr(24,56,":");
+        }
+        
+        u8g2.setFont(u8g2_font_logisoso26_tf);
+        u8g2.drawStr(30,61,buf_c);
+        u8g2.setFont(u8g2_font_ncenB08_tf);
+        u8g2.drawStr(102,58,"ppm");
+      
+        u8g2.sendBuffer();          // transfer internal memory to the display
+        
+        prevTime = nowTime;
+      }      
+      break;
 
-  //toggle for the heartbeat telltale
-  if (toggle==true){
-    toggle=false;
-  }
-  else {
-    toggle=true;
-  }
+    case 1:
+      if (button_cal.wasPressed()) {
+        button_cal.read();
+        state = 2;
+      }
+      u8g2.clearBuffer();          // clear the internal memory
+      u8g2.setFont(u8g2_font_ncenB08_tf);
+      u8g2.drawStr(0,21,"To Calibrate:"); // write something to the internal memory
+      u8g2.drawStr(0,35,"Open air for 20min");
+      u8g2.drawStr(0,49,"Press [CAL] TWICE in"); 
+      cal_countdown = CAL_TIMEOUT_S-round((millis()-prevTime)/1000);
+      sprintf(buf_cal, "the next %d seconds.", cal_countdown);
+      u8g2.drawStr(0,63,buf_cal); 
+      u8g2.sendBuffer();          // transfer internal memory to the display
+      if (cal_countdown < 0) {
+        state = 0;
+      }
+      break;
 
-  //get reading from O2 sensor
-  o2serial.print("A\r\n");
-  o2serial.flush();
-  delay(1000);
+    case 2:
+      if (button_cal.wasPressed()) {
+        button_cal.read();
+        state = 3;
+      }
+      u8g2.clearBuffer();          // clear the internal memory
+      u8g2.setFont(u8g2_font_ncenB08_tf);
+      u8g2.drawStr(0,21,"To Calibrate:"); // write something to the internal memory
+      u8g2.drawStr(0,35,"Open air for 20min");
+      u8g2.drawStr(0,49,"Press [CAL] ONCE in"); 
+      cal_countdown = CAL_TIMEOUT_S-round((millis()-prevTime)/1000);
+      sprintf(buf_cal, "the next %d seconds.", cal_countdown);
+      u8g2.drawStr(0,63,buf_cal); 
+      u8g2.sendBuffer();          // transfer internal memory to the display
+      if (cal_countdown < 0) {
+        state = 0;
+      }
+      break;
 
-  if(o2serial.find("P")) {
-    mbarPres = o2serial.parseInt();
-  }
-  
-  if(o2serial.find("%")) {
-    percentO2 = o2serial.parseFloat(); //round
-  }
-  
-  o2serial.find("\n"); //read the rest of the line
+    case 3:
+      u8g2.clearBuffer();          // clear the internal memory
+      u8g2.setFont(u8g2_font_ncenB10_tf);
+      u8g2.drawStr(0,42,"Calibrating..."); // write something to the internal memory
+      u8g2.sendBuffer();          // transfer internal memory to the display
+      co2serial.write(co2_cmd_cal_baseline, sizeof(co2_cmd_cal_baseline));  //disable auto baseline calibration
+      delay(1000);
+      while(co2serial.available()){
+        co2serial.read();
+      }
+      state = 4;
+      break;
 
-  //get reading from CO2 sensor
-  byte response[9];
-  int i = 0;
-  co2serial.write(co2_cmd_read, sizeof(co2_cmd_read));
-  while(co2serial.available() < 8) {  //wait for the bits to come in
-    delay(10);
-  }
-  while(co2serial.available()) {
-    if (i < 9) {
-      response[i] = co2serial.read();
-      i++;
-    } else {
-      co2serial.read();
-    }
-  }
-  delay(100);
-  while(co2serial.available()){
-    co2serial.read();
-  }
-  
-  ppmCO2 = 256*int(response[2]) + int(response[3]);
-  sprintf(buf_c, "%4u" ,ppmCO2); 
-  
-  sprintf(buf_pres,"%4d",mbarPres);
-  sprintf(buf_o,"%2.1f",percentO2);
-  
-  //display section
-  u8g2.clearBuffer();					// clear the internal memory
-  //u8g2.setFont(u8g2_font_ncenB08_tr);	// choose a suitable font
+    case 4:
+      u8g2.clearBuffer();          // clear the internal memory
+      u8g2.setFont(u8g2_font_ncenB10_tf);
+      u8g2.drawStr(0,42,"Calibration"); // write something to the internal memory
+      u8g2.drawStr(0,56,"Complete."); // write something to the internal memory
+      u8g2.sendBuffer();          // transfer internal memory to the display
+      delay(1000);
+      state = 0;
+      break;
 
-  
-  u8g2.setFont(u8g2_font_ncenB10_tf);
-  u8g2.drawStr(0,21,"O"); // write something to the internal memory
-  u8g2.setFont(u8g2_font_ncenB08_tf);
-  u8g2.drawStr(9,24,"2");
-  if (toggle==true){
-    u8g2.setFont(u8g2_font_logisoso22_tf);
-    u8g2.drawStr(15,24,":");
+    default:
+      state = 0;
+      break;
   }
-  
-  u8g2.setFont(u8g2_font_logisoso26_tf);
-  u8g2.drawStr(23,29,buf_o);
-  u8g2.setFont(u8g2_font_logisoso20_tf);
-  u8g2.drawStr(84,26,"%");
-  
-  u8g2.setFont(u8g2_font_ncenB08_tf);
-  u8g2.drawStr(100,7,"pres");
-  if (toggle==true){
-    u8g2.setFont(u8g2_font_ncenB08_tf);
-    u8g2.drawStr(125,7,":");
-  }
-  u8g2.setFont(u8g2_font_ncenB08_tf);
-  u8g2.drawStr(100,20,buf_pres);  
-  u8g2.setFont(u8g2_font_ncenB08_tf);
-  u8g2.drawStr(100,32,"mbar");  	
-
-  u8g2.setFont(u8g2_font_ncenB10_tf);
-  u8g2.drawStr(0,53,"CO"); // write something to the internal memory
-  u8g2.setFont(u8g2_font_ncenB08_tf);
-  u8g2.drawStr(18,56,"2");
-  if (toggle==true){
-    u8g2.setFont(u8g2_font_logisoso22_tf);
-    u8g2.drawStr(24,56,":");
-  }
-  
-  u8g2.setFont(u8g2_font_logisoso26_tf);
-  u8g2.drawStr(30,61,buf_c);
-  u8g2.setFont(u8g2_font_ncenB08_tf);
-  u8g2.drawStr(102,58,"ppm");
-
-  u8g2.sendBuffer();          // transfer internal memory to the display
   
 }
