@@ -250,10 +250,12 @@ Button2 button_cal;
 bool toggle;
 float percentO2;
 int mbarPres;
+int temp;
 char buf_o [5];
 char buf_pres [5];
 char buf_c [5];
 char buf_cal [22];
+char buf_t[6];
 int dummy;
 int ppmCO2;
 int state = 0;
@@ -323,6 +325,10 @@ void loop(void) {
         o2serial.print("A\r\n");
         o2serial.flush();
         delay(100);
+
+        if(o2serial.find("T")) {
+          temp = o2serial.parseFloat();
+        }
       
         if(o2serial.find("P")) {
           mbarPres = o2serial.parseInt();
@@ -359,6 +365,7 @@ void loop(void) {
         //format reading from O2 sensor
         sprintf(buf_pres,"%4d",mbarPres);
         sprintf(buf_o,"%2.1f",percentO2);
+        sprintf(buf_t,"%d%cC", (int)round(temp), 0xB0);     
         
         //format reading from CO2 sensor
         sprintf(buf_c, "%4u" ,ppmCO2); 
@@ -389,7 +396,11 @@ void loop(void) {
         u8g2.setFont(u8g2_font_ncenB08_tf);
         u8g2.drawStr(100,20,buf_pres);  
         u8g2.setFont(u8g2_font_ncenB08_tf);
-        u8g2.drawStr(100,32,"mbar");  	
+        u8g2.drawStr(100,32,"mbar");
+
+        u8g2.setFont(u8g2_font_ncenB08_tf);
+        u8g2.drawStr(100,44,buf_t);
+         
       
         u8g2.setFont(u8g2_font_ncenB10_tf);
         u8g2.drawStr(0,53,"CO"); // write something to the internal memory
