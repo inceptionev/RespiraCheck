@@ -36,6 +36,11 @@
 #include <Button2.h>
 #include <Arduino.h>
 #include <U8g2lib.h>
+#include <WiFi.h>
+#include <esp_wifi.h>
+#include "driver/adc.h"
+#include <esp_bt.h>
+#include <esp_sleep.h>
 
 #ifdef U8X8_HAVE_HW_SPI
 #include <SPI.h>
@@ -234,7 +239,7 @@ U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, /* clock=*/ 15, /* data=*/ 4, 
 #define PIN_BUTTON_CAL 0
 
 #define UPDATE_PERIOD_MS 1000
-#define INTERFACE_CYCLE_MS 50
+#define INTERFACE_CYCLE_MS 300
 #define CAL_TIMEOUT_S 10
 
 SoftwareSerial o2serial;
@@ -269,6 +274,7 @@ void setup(void) {
   Serial.begin(115200);
 
   button_cal.begin(PIN_BUTTON_CAL);
+  button_cal.setReleasedHandler(button_cal_released);
   
   o2serial.begin(9600, SWSERIAL_8N1, PIN_O2_RX, PIN_O2_TX, false);
   co2serial.begin(9600, SWSERIAL_8N1, PIN_CO2_RX, PIN_CO2_TX, false);
@@ -281,20 +287,26 @@ void setup(void) {
   while(co2serial.available()){
     co2serial.read();
   }
+
+  //power saving
+  adc_power_off();
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  setCpuFrequencyMhz(10);
+  btStop();
 }
 
 void loop(void) {
   
   button_cal.loop();
-  delay(INTERFACE_CYCLE_MS);  //to reduce processing cycles
+  //delay(INTERFACE_CYCLE_MS);  //to reduce processing cycles
+  esp_sleep_enable_timer_wakeup(INTERFACE_CYCLE_MS * 1000);
+  esp_light_sleep_start();
   
   switch(state) {
     
     case 0: //read sensors and update the display
-      if (button_cal.wasPressed()) {
-        button_cal.read();
-        state = 1;
-      }
+      
       nowTime = millis();
       Serial.println(nowTime-prevTime);
       if (nowTime - prevTime > UPDATE_PERIOD_MS || nowTime - prevTime < 0) {
@@ -400,10 +412,7 @@ void loop(void) {
       break;
 
     case 1:
-      if (button_cal.wasPressed()) {
-        button_cal.read();
-        state = 2;
-      }
+      
       u8g2.clearBuffer();          // clear the internal memory
       u8g2.setFont(u8g2_font_ncenB08_tf);
       u8g2.drawStr(0,21,"To Calibrate:"); // write something to the internal memory
@@ -419,10 +428,7 @@ void loop(void) {
       break;
 
     case 2:
-      if (button_cal.wasPressed()) {
-        button_cal.read();
-        state = 3;
-      }
+      
       u8g2.clearBuffer();          // clear the internal memory
       u8g2.setFont(u8g2_font_ncenB08_tf);
       u8g2.drawStr(0,21,"To Calibrate:"); // write something to the internal memory
@@ -465,4 +471,10 @@ void loop(void) {
       break;
   }
   
+}
+
+void button_cal_released(Button2& btn) {
+  if(state == 0 || state == 1 || state == 2) {
+    state++;
+  }
 }
